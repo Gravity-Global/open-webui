@@ -1956,6 +1956,7 @@ class QueryDocForm(BaseModel):
     k_reranker: Optional[int] = None
     r: Optional[float] = None
     hybrid: Optional[bool] = None
+    hybrid_bm25_weight: Optional[float] = None
 
 
 @router.post("/query/doc")
@@ -1990,8 +1991,7 @@ def query_doc_handler(
                     form_data.hybrid_bm25_weight
                     if form_data.hybrid_bm25_weight
                     else request.app.state.config.HYBRID_BM25_WEIGHT
-                ),
-                user=user,
+                )
             )
         else:
             return query_doc(
