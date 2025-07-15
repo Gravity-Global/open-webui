@@ -13,6 +13,14 @@ from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriev
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
+# Add sentence_transformers import at module level to avoid threading issues
+try:
+    from sentence_transformers import util as sentence_transformers_util
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    sentence_transformers_util = None
+
 from open_webui.config import VECTOR_DB
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
@@ -947,13 +955,14 @@ class RerankCompressor(BaseDocumentCompressor):
                 [(query, doc.page_content) for doc in documents]
             )
         else:
-            from sentence_transformers import util
+            if not SENTENCE_TRANSFORMERS_AVAILABLE:
+                raise ImportError("sentence_transformers is not available. Please install it to use reranking functionality.")
 
             query_embedding = self.embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
             document_embedding = self.embedding_function(
                 [doc.page_content for doc in documents], RAG_EMBEDDING_CONTENT_PREFIX
             )
-            scores = util.cos_sim(query_embedding, document_embedding)[0]
+            scores = sentence_transformers_util.cos_sim(query_embedding, document_embedding)[0]
 
         docs_with_scores = list(
             zip(documents, scores.tolist() if not isinstance(scores, list) else scores)
