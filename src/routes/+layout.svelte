@@ -2,12 +2,17 @@
 	import { io } from 'socket.io-client';
 	import { spring } from 'svelte/motion';
 	import PyodideWorker from '$lib/workers/pyodide.worker?worker';
+	import { 
+		setupFetchInterceptor, 
+		forceLogoutAndRedirect,
+		setSessionExpiryHandler
+	} from '$lib/utils/fetchWithTokenRefresh';
 
 	let loadingProgress = spring(0, {
 		stiffness: 0.05
 	});
 
-	import { onMount, tick, setContext, onDestroy } from 'svelte';
+	import { onMount, tick, setContext } from 'svelte';
 	import {
 		config,
 		user,
@@ -32,7 +37,7 @@
 	import { Toaster, toast } from 'svelte-sonner';
 
 	import { executeToolServer, getBackendConfig } from '$lib/apis';
-	import { getSessionUser, userSignOut } from '$lib/apis/auths';
+	import { getSessionUser } from '$lib/apis/auths';
 
 	import '../tailwind.css';
 	import '../app.css';
@@ -50,6 +55,8 @@
 	import { beforeNavigate } from '$app/navigation';
 	import { updated } from '$app/state';
 
+	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+
 	// handle frontend updates (https://svelte.dev/docs/kit/configuration#version)
 	beforeNavigate(({ willUnload, to }) => {
 		if (updated.current && !willUnload && to?.url) {
@@ -60,11 +67,14 @@
 	setContext('i18n', i18n);
 
 	const bc = new BroadcastChannel('active-tab-channel');
+	const sessionBC = new BroadcastChannel('session-refresh-channel');
 
 	let loaded = false;
 	let tokenTimer = null;
 
 	const BREAKPOINT = 768;
+
+	let showReauthDialog = false;
 
 	const setupSocket = async (enableWebsocket) => {
 		const _socket = io(`${WEBUI_BASE_URL}` || undefined, {
@@ -458,16 +468,66 @@
 			return;
 		}
 
-		if (now >= exp - TOKEN_EXPIRY_BUFFER) {
-			const res = await userSignOut();
-			user.set(null);
-			localStorage.removeItem('token');
-
-			location.href = res?.redirect_url ?? '/auth';
+		// Check if token is expiring soon with the fixed 30-second buffer
+		if (now >= (exp - TOKEN_EXPIRY_BUFFER)) {			
+			handleSessionExpiryWithCoordination();
 		}
 	};
 
+	// Add a function to refresh the user session without reloading
+	async function refreshSessionUser() {
+		console.info('[Cursor] Refreshing session user data without reload');
+		if (localStorage.token) {
+			try {
+				const sessionUser = await getSessionUser(localStorage.token);
+				if (sessionUser) {
+					console.info('[Cursor] Got valid session user:', sessionUser.username || sessionUser.email);
+					await user.set(sessionUser);
+					console.info('[Cursor] Updated user store');
+					await config.set(await getBackendConfig());
+					
+					// Re-establish socket connection with new token
+					if ($socket) {
+						console.info('[Cursor] Emitting user-join with new token');
+						$socket.emit('user-join', { auth: { token: sessionUser.token } });
+					}
+					
+					console.info('[Cursor] Session refreshed successfully');
+					// Show a toast notification that the session was refreshed
+					toast.success('Your session has been refreshed', {
+						duration: 3000
+					});
+					
+					// Hide the reauth dialog if it's showing
+					showReauthDialog = false;
+					
+					return true;
+				} else {
+					console.warn('[Cursor] Got null session user');
+				}
+			} catch (error) {
+				console.error('[Cursor] Failed to refresh session user:', error);
+			}
+		} else {
+			console.warn('[Cursor] No token available for refresh');
+		}
+		return false;
+	}
+
+	// Update the forceLogoutAndRedirect function to broadcast when re-authentication is complete
+	function handleSessionExpiryWithCoordination() {
+		console.info('[Cursor] Session expiry detected, showing dialog');
+		showReauthDialog = true;
+	}
+
 	onMount(async () => {
+		// Set up the session expiry handler first, before setting up the fetch interceptor
+		console.info('[Cursor] Setting up session expiry handler...');
+		setSessionExpiryHandler(handleSessionExpiryWithCoordination);
+		
+		console.info('[Cursor] Setting up fetch interceptor...');
+		setupFetchInterceptor();
+
 		if (typeof window !== 'undefined' && window.applyTheme) {
 			window.applyTheme();
 		}
@@ -583,17 +643,25 @@
 				if (localStorage.token) {
 					// Get Session User Info
 					const sessionUser = await getSessionUser(localStorage.token).catch((error) => {
-						toast.error(`${error}`);
+						console.error('Session user fetch failed:', error);
+						toast.error(`Authentication error: ${error}`);
+
+						// Clear token on auth error
+						localStorage.removeItem('token');
 						return null;
 					});
 
 					if (sessionUser) {
 						await user.set(sessionUser);
 						await config.set(await getBackendConfig());
+
+						// Run check immediately
+						checkTokenExpiry();
 					} else {
 						// Redirect Invalid Session User to /auth Page
 						localStorage.removeItem('token');
-						await goto(`/auth?redirect=${encodedUrl}`);
+						// Use window.location for a complete page reload
+						window.location.href = `/?redirect=${encodedUrl}&invalid=true`;
 					}
 				} else {
 					// Don't redirect if we're already on the auth page
@@ -640,6 +708,43 @@
 			loaded = true;
 		}
 
+		// Listen for session refresh broadcasts from other tabs
+		sessionBC.onmessage = async (event) => {
+			if (event.data === 'session-refreshed') {
+				await refreshSessionUser();
+			}
+		};
+
+		// Update the storage event listener to handle token changes
+		window.addEventListener('storage', async function(event) {
+			if (event.key === 'token') {
+				if (event.newValue === null) {
+					// Token was removed in another tab
+					console.log('[Cursor] TOKEN REMOVED IN ANOTHER TAB');
+					// Instead of reloading, show the reauth dialog
+					handleSessionExpiryWithCoordination();
+				} else if (event.oldValue === null && event.newValue) {
+					// Token was added in another tab (user logged in again)
+					console.log('[Cursor] TOKEN ADDED IN ANOTHER TAB - REFRESHING SESSION');
+
+					// Broadcast to other tabs that they should refresh too
+					// This helps ensure all tabs get the message
+					const sessionBC = new BroadcastChannel('session-refresh-channel');
+					sessionBC.postMessage('session-refreshed');
+					sessionBC.close();
+				} else if (event.oldValue !== event.newValue) {
+					// Token was changed in another tab
+					console.log('[Cursor] TOKEN CHANGED IN ANOTHER TAB - REFRESHING SESSION');
+					
+					// Broadcast to other tabs that they should refresh too
+					// This helps ensure all tabs get the message
+					const sessionBC = new BroadcastChannel('session-refresh-channel');
+					sessionBC.postMessage('session-refreshed');
+					sessionBC.close();
+				}
+			}
+		});
+
 		return () => {
 			window.removeEventListener('resize', onResize);
 		};
@@ -681,4 +786,17 @@
 	richColors
 	position="top-right"
 	closeButton
+/>
+
+<ConfirmDialog
+	title="Session Expired"
+	message="Your session has expired. Click 'Re-authenticate' to reload the page and sign in again, or click 'Cancel' to close this dialog and save your unsaved work before manually reloading."
+	show={showReauthDialog}
+	cancelLabel="Cancel"
+	confirmLabel="Re-authenticate"
+	on:cancel={() => (showReauthDialog = false)}
+	on:confirm={() => {
+		forceLogoutAndRedirect('Reloading for re-authentication...');
+		showReauthDialog = false;
+	}}
 />
