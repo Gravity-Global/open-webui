@@ -461,6 +461,13 @@ from open_webui.tasks import (
 
 from open_webui.utils.redis import get_sentinels_from_env
 
+ROLLBAR_ACCESS_TOKEN = os.environ.get("ROLLBAR_ACCESS_TOKEN", "")
+
+if ROLLBAR_ACCESS_TOKEN:
+    import rollbar
+
+    # Initialize Rollbar SDK with your server-side access token
+    rollbar.init(ROLLBAR_ACCESS_TOKEN)
 
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
@@ -572,6 +579,10 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+if ROLLBAR_ACCESS_TOKEN:
+    from rollbar.contrib.fastapi import add_to as rollbar_add_to
+
+    rollbar_add_to(app)
 
 oauth_manager = OAuthManager(app)
 
