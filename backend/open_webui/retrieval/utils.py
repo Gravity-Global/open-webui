@@ -125,6 +125,101 @@ def query_doc_with_hybrid_search(
 ) -> dict:
     try:
         log.debug(f"query_doc_with_hybrid_search:doc {collection_name}")
+        
+        # Check if we're using Qdrant and it has native hybrid search capability
+        if VECTOR_DB == "qdrant" and hasattr(VECTOR_DB_CLIENT, 'hybrid_search'):
+            log.info("Using Qdrant native hybrid search")
+            
+            # Generate query embedding
+            query_embedding = embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
+            
+            # Use Qdrant's native hybrid search with RRF fusion
+            result = VECTOR_DB_CLIENT.hybrid_search(  # type: ignore
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                query_text=query,
+                limit=k_reranker,  # Get more results for reranking
+            )
+            
+            if result and result.documents and result.documents[0]:
+                # Convert SearchResult to the expected format
+                documents = result.documents[0]
+                metadatas = result.metadatas[0] if result.metadatas else [{}] * len(documents)
+                distances = result.distances[0] if result.distances else [0.0] * len(documents)
+                
+                # Apply reranking if available
+                if reranking_function and len(documents) > 1:
+                    log.debug("Applying reranking to Qdrant hybrid search results")
+                    
+                    # Create documents for reranking
+                    docs_for_reranking = [
+                        Document(page_content=doc, metadata=meta) 
+                        for doc, meta in zip(documents, metadatas)
+                    ]
+                    
+                    # Apply reranking
+                    reranked_docs = reranking_function([query], docs_for_reranking)
+                    
+                    # Extract reranked results
+                    if reranked_docs and len(reranked_docs) > 0:
+                        reranked_batch = reranked_docs[0]  # First query batch
+                        
+                        # Filter by relevance threshold and limit to k
+                        filtered_docs = []
+                        for doc in reranked_batch:
+                            score = doc.metadata.get("score", 0.0)
+                            if score >= r:  # Apply relevance threshold
+                                filtered_docs.append(doc)
+                        
+                        # Limit to k results
+                        filtered_docs = filtered_docs[:k]
+                        
+                        # Extract final results
+                        final_documents = [doc.page_content for doc in filtered_docs]
+                        final_metadatas = [doc.metadata for doc in filtered_docs]
+                        final_distances = [doc.metadata.get("score", 0.0) for doc in filtered_docs]
+                        
+                        result_dict = {
+                            "distances": [final_distances],
+                            "documents": [final_documents],
+                            "metadatas": [final_metadatas],
+                        }
+                    else:
+                        # No reranking results, use original
+                        result_dict = {
+                            "distances": [distances[:k]],
+                            "documents": [documents[:k]],
+                            "metadatas": [metadatas[:k]],
+                        }
+                else:
+                    # No reranking, just apply relevance threshold and limit
+                    if r > 0.0:
+                        # Filter by relevance threshold
+                        filtered_indices = [i for i, score in enumerate(distances) if score >= r][:k]
+                        filtered_documents = [documents[i] for i in filtered_indices]
+                        filtered_metadatas = [metadatas[i] for i in filtered_indices]
+                        filtered_distances = [distances[i] for i in filtered_indices]
+                    else:
+                        # No threshold, just limit to k
+                        filtered_documents = documents[:k]
+                        filtered_metadatas = metadatas[:k]
+                        filtered_distances = distances[:k]
+                    
+                    result_dict = {
+                        "distances": [filtered_distances],
+                        "documents": [filtered_documents],
+                        "metadatas": [filtered_metadatas],
+                    }
+                
+                log.info(
+                    f"query_doc_with_hybrid_search:qdrant_native_result {len(result_dict['documents'][0])} documents"
+                )
+                return result_dict
+            else:
+                log.warning("Qdrant hybrid search returned no results, falling back to LangChain approach")
+        
+        # Fall back to LangChain-based hybrid search (original implementation)
+        log.debug("Using LangChain-based hybrid search")
         bm25_retriever = BM25Retriever.from_texts(
             texts=collection_result.documents[0],
             metadatas=collection_result.metadatas[0],
@@ -183,7 +278,7 @@ def query_doc_with_hybrid_search(
         }
 
         log.info(
-            "query_doc_with_hybrid_search:result "
+            "query_doc_with_hybrid_search:langchain_result "
             + f'{result["metadatas"]} {result["distances"]}'
         )
         return result
