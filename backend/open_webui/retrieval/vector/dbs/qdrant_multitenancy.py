@@ -9,6 +9,7 @@ from open_webui.config import (
     QDRANT_PREFER_GRPC,
     QDRANT_URI,
     QDRANT_COLLECTION_PREFIX,
+    ENABLE_RAG_HYBRID_SEARCH,
 )
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.retrieval.vector.main import (
@@ -194,7 +195,7 @@ class QdrantClient(VectorDBBase):
         if not self.client.collection_exists(collection_name=mt_collection_name):
             self._create_multi_tenant_collection(mt_collection_name, dimension)
 
-    def hybrid_search(
+    def _hybrid_search(
         self,
         collection_name: str,
         query_vector: List[float],
@@ -426,13 +427,25 @@ class QdrantClient(VectorDBBase):
         )
 
     def search(
-        self, collection_name: str, vectors: List[List[float | int]], limit: int
+        self, collection_name: str, vectors: List[List[float | int]], limit: int, query_text: Optional[str] = None
     ) -> Optional[SearchResult]:
         """
         Search for the nearest neighbor items based on the vectors with tenant isolation.
+        Uses hybrid search when ENABLE_RAG_HYBRID_SEARCH is True and query_text is provided.
         """
         if not self.client or not vectors:
             return None
+        
+        # Use hybrid search if enabled and query text is available
+        if ENABLE_RAG_HYBRID_SEARCH and query_text:
+            return self._hybrid_search(
+                collection_name=collection_name,
+                query_vector=vectors[0],
+                query_text=query_text,
+                limit=limit
+            )
+        
+        # Fallback to regular dense vector search
         mt_collection, tenant_id = self._get_collection_and_tenant_id(collection_name)
         if not self.client.collection_exists(collection_name=mt_collection):
             log.debug(f"Collection {mt_collection} doesn't exist, search returns None")

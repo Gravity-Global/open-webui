@@ -34,6 +34,7 @@ from open_webui.config import (
     RAG_EMBEDDING_QUERY_PREFIX,
     RAG_EMBEDDING_CONTENT_PREFIX,
     RAG_EMBEDDING_PREFIX_FIELD_NAME,
+    ENABLE_RAG_HYBRID_SEARCH,
 )
 
 log = logging.getLogger(__name__)
@@ -126,19 +127,19 @@ def query_doc_with_hybrid_search(
     try:
         log.debug(f"query_doc_with_hybrid_search:doc {collection_name}")
         
-        # Check if we're using Qdrant and it has native hybrid search capability
-        if VECTOR_DB == "qdrant" and hasattr(VECTOR_DB_CLIENT, 'hybrid_search'):
-            log.info("Using Qdrant native hybrid search")
+        # Use Qdrant's integrated search
+        if VECTOR_DB == "qdrant":
+            log.info("Using Qdrant search (hybrid if enabled)")
             
             # Generate query embedding
             query_embedding = embedding_function(query, RAG_EMBEDDING_QUERY_PREFIX)
             
-            # Use Qdrant's native hybrid search with RRF fusion
-            result = VECTOR_DB_CLIENT.hybrid_search(  # type: ignore
+            # Use Qdrant's search method with query_text
+            result = VECTOR_DB_CLIENT.search(
                 collection_name=collection_name,
-                query_vector=query_embedding,
-                query_text=query,
+                vectors=[query_embedding],
                 limit=k_reranker,  # Get more results for reranking
+                query_text=query,  # type: ignore  # Enables hybrid search internally
             )
             
             if result and result.documents and result.documents[0]:
