@@ -247,10 +247,13 @@ class GroupTable:
         with get_db() as db:
             try:
                 groups = db.query(Group).filter(Group.name.in_(group_names)).all()
+                log.info(f"new groups: {[[group.id, group.name] for group in groups]}")
                 group_ids = [group.id for group in groups]
 
                 # Remove user from groups not in the new list
                 existing_groups = self.get_groups_by_member_id(user_id)
+
+                log.info(f"Existing groups: {[[group.id, group.name] for group in existing_groups]}")
 
                 for group in existing_groups:
                     if group.id not in group_ids:
