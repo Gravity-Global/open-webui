@@ -34,7 +34,7 @@ RUN npm ci --force
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
-RUN npm run build
+RUN NODE_OPTIONS="--max_old_space_size=4096" npm run build
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
@@ -86,6 +86,9 @@ ENV TIKTOKEN_ENCODING_NAME="cl100k_base" \
 ## Hugging Face download cache ##
 ENV HF_HOME="/app/backend/data/cache/embedding/models"
 
+## FastEmbed cache directory ##
+ENV FASTEMBED_CACHE_PATH="/app/backend/data/cache/fastembed"
+
 ## Torch Extensions ##
 # ENV TORCH_EXTENSIONS_DIR="/.cache/torch_extensions"
 
@@ -116,7 +119,7 @@ RUN if [ "$USE_OLLAMA" = "true" ]; then \
     # for RAG OCR
     apt-get install -y --no-install-recommends ffmpeg libsm6 libxext6 && \
     # install helper tools
-    apt-get install -y --no-install-recommends curl jq && \
+    apt-get install -y --no-install-recommends curl jq cron && \
     # install ollama
     curl -fsSL https://ollama.com/install.sh | sh && \
     # cleanup
@@ -124,7 +127,7 @@ RUN if [ "$USE_OLLAMA" = "true" ]; then \
     else \
     apt-get update && \
     # Install pandoc, netcat and gcc
-    apt-get install -y --no-install-recommends git build-essential pandoc gcc netcat-openbsd curl jq && \
+    apt-get install -y --no-install-recommends git build-essential pandoc gcc netcat-openbsd curl jq cron && \
     apt-get install -y --no-install-recommends gcc python3-dev && \
     # for RAG OCR
     apt-get install -y --no-install-recommends ffmpeg libsm6 libxext6 && \
@@ -165,6 +168,12 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 
 # copy backend files
 COPY --chown=$UID:$GID ./backend .
+
+# Create directories for logs
+RUN mkdir -p /var/log && \
+    touch /var/log/clean-orphaned-files.log && \
+    chmod 644 /var/log/clean-orphaned-files.log && \
+    chown $UID:$GID /var/log/clean-orphaned-files.log
 
 EXPOSE 8080
 
